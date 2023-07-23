@@ -7,30 +7,6 @@ namespace Nutcrackz {
 
 	namespace Utils {
 
-		static GLenum NutcrackzVideoImageFormatToGLDataFormat(ImageFormat format)
-		{
-			switch (format)
-			{
-				case ImageFormat::RGB8:  return GL_RGB;
-				case ImageFormat::RGBA8: return GL_RGBA;
-			}
-
-			NZ_CORE_ASSERT(false);
-			return 0;
-		}
-
-		static GLenum NutcrackzVideoImageFormatToGLInternalFormat(ImageFormat format)
-		{
-			switch (format)
-			{
-				case ImageFormat::RGB8:  return GL_RGB8;
-				case ImageFormat::RGBA8: return GL_RGBA8;
-			}
-
-			NZ_CORE_ASSERT(false);
-			return 0;
-		}
-
 		static AVPixelFormat CorrectForDeprecatedPixelFormat(AVPixelFormat pix_fmt)
 		{
 			// Fix swscaler deprecated pixel format warning
@@ -99,67 +75,57 @@ namespace Nutcrackz {
 
 	}
 
-	VideoTexture::VideoTexture(const TextureSpecification& specification)
-		: m_Specification(specification), m_Width(m_Specification.Width), m_Height(m_Specification.Height)
+	VideoTexture::VideoTexture(const TextureSpecification& specification, Buffer data, const VideoReaderState& state)
+		: m_Specification(specification), m_Width(m_Specification.Width), m_Height(m_Specification.Height), m_VideoState(state)
 	{
 		//NZ_PROFILE_FUNCTION();
 
 		glCreateTextures(GL_TEXTURE_2D, 1, &m_RendererID);
-		glTextureStorage2D(m_RendererID, 1, GL_RGB8, m_Width, m_Height);
+		glTextureStorage2D(m_RendererID, 1, GL_RGBA8, m_Width, m_Height);
 
-		glTextureParameteri(m_RendererID, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-		glTextureParameteri(m_RendererID, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-		glTextureParameteri(m_RendererID, GL_TEXTURE_WRAP_S, GL_REPEAT);
-		glTextureParameteri(m_RendererID, GL_TEXTURE_WRAP_T, GL_REPEAT);
-	}
-
-	VideoTexture::VideoTexture(const std::string& path, uint8_t* frameData)
-		: m_VideoPath(path)
-	{
-		if (!VideoReaderOpen(&m_VideoState, m_VideoPath))
+		if (!m_Specification.UseLinear)
 		{
-			NZ_CORE_WARN("Couldn't load video file!");
-			return;
-		}
-
-		const int frameWidth = m_VideoState.Width;
-		const int frameHeight = m_VideoState.Height;
-		frameData = new uint8_t[frameWidth * frameHeight * 4];
-
-		m_Width = frameWidth;
-		m_Height = frameHeight;
-
-		glCreateTextures(GL_TEXTURE_2D, 1, &m_RendererID);
-		glTextureStorage2D(m_RendererID, 1, GL_RGBA8, frameWidth, frameHeight);
-
-		glTextureParameteri(m_RendererID, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-		glTextureParameteri(m_RendererID, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-		glTextureParameteri(m_RendererID, GL_TEXTURE_WRAP_S, GL_REPEAT);
-		glTextureParameteri(m_RendererID, GL_TEXTURE_WRAP_T, GL_REPEAT);
-
-		int64_t pts;
-		if (!VideoReaderReadFrame(&m_VideoState, frameData, &pts, false))
-		{
-			NZ_CORE_WARN("Couldn't load video frame!");
-			return;
-		}
-
-		if (frameData)
-		{
-			m_IsLoaded = true;
-			glTextureSubImage2D(m_RendererID, 0, 0, 0, frameWidth, frameHeight, GL_RGBA, GL_UNSIGNED_BYTE, frameData);
+			glTextureParameteri(m_RendererID, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+			glTextureParameteri(m_RendererID, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 		}
 		else
 		{
-			NZ_CORE_TRACE("Failed to load video texture.");
+			glTextureParameteri(m_RendererID, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+			glTextureParameteri(m_RendererID, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		}
+
+		glTextureParameteri(m_RendererID, GL_TEXTURE_WRAP_S, GL_REPEAT);
+		glTextureParameteri(m_RendererID, GL_TEXTURE_WRAP_T, GL_REPEAT);
+
+		if (data)
+		{
+			if (!m_IsVideoLoaded)
+				m_IsVideoLoaded = true;
+
+			int64_t pts;
+			if (!VideoReaderReadFrame(&m_VideoState, data.Data, &pts, false))
+			{
+				NZ_CORE_WARN("Couldn't load video frame!");
+				return;
+			}
+
+			SetData(data);
 		}
 	}
 
 	VideoTexture::~VideoTexture()
 	{
 		glDeleteTextures(1, &m_RendererID);
+
+		if (m_IsVideoLoaded)
+		{
+			CloseVideo(&m_VideoState);
+		}
+
+		if (m_HasLoadedAudio)
+		{
+			CloseAudio(&m_VideoState);
+		}
 	}
 
 	uint32_t VideoTexture::GetIDFromTexture(uint8_t* frameData, int64_t* pts, bool isPaused)
@@ -168,7 +134,7 @@ namespace Nutcrackz {
 
 		if (!m_IsVideoLoaded)
 		{
-			if (!VideoReaderOpen(&m_VideoState, m_VideoPath))
+			if (!VideoReaderOpen(&m_VideoState, m_VideoState.FilePath))
 			{
 				NZ_CORE_WARN("Couldn't load video file!");
 				return 0;
@@ -237,7 +203,7 @@ namespace Nutcrackz {
 		auto& videoStream = state->VideoStream;
 		auto& avFrame = state->VideoFrame;
 		auto& avPacket = state->VideoPacket;
-
+		
 		avFormatContext = avformat_alloc_context();
 
 		if (!avFormatContext)
@@ -271,8 +237,8 @@ namespace Nutcrackz {
 
 		// Find the first valid video stream inside file!
 		videoStreamIndex = -1;
-		AVCodecParameters* avVideoCodecParams;
-		AVCodec* avVideoCodec;
+		AVCodecParameters* avVideoCodecParams = nullptr;
+		AVCodec* avVideoCodec = nullptr;
 
 		for (unsigned int i = 0; i < avFormatContext->nb_streams; ++i)
 		{
@@ -437,31 +403,6 @@ namespace Nutcrackz {
 		return true;
 	}
 
-	bool m_PauseAudio = false;
-	void ffmpeg_to_miniaudio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount)
-	{
-		if (!m_PauseAudio)
-		{
-			AVAudioFifo* fifo = reinterpret_cast<AVAudioFifo*>(pDevice->pUserData);
-			av_audio_fifo_read(fifo, &pOutput, frameCount);
-		}
-		else
-		{
-			size_t len = pDevice->playback.channels * frameCount;
-			switch (pDevice->playback.format)
-			{
-			case ma_format_unknown: 0; break;
-			case ma_format_u8: memset(pOutput, 127, len * 1); break;
-			case ma_format_s16: memset(pOutput, 0, len * 2); break;
-			case ma_format_s24: memset(pOutput, 0, len * 3); break;
-			case ma_format_s32: memset(pOutput, 0, len * 4); break;
-			case ma_format_f32: memset(pOutput, 0, len * 4); break;
-			};
-		}
-
-		(void)pInput;
-	}
-
 	bool VideoTexture::VideoReaderSeekFrame(VideoReaderState* state, int64_t ts)
 	{
 		// Unpack members of state
@@ -521,6 +462,30 @@ namespace Nutcrackz {
 		return true;
 	}
 
+	bool m_PauseAudio = false;
+	void ffmpeg_to_miniaudio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount)
+	{
+		if (!m_PauseAudio)
+		{
+			AVAudioFifo* fifo = reinterpret_cast<AVAudioFifo*>(pDevice->pUserData);
+			av_audio_fifo_read(fifo, &pOutput, frameCount);
+		}
+		else
+		{
+			size_t len = pDevice->playback.channels * frameCount;
+			switch (pDevice->playback.format)
+			{
+				case ma_format_unknown: 0; break;
+				case ma_format_u8: memset(pOutput, 127, len * 1); break;
+				case ma_format_s16: memset(pOutput, 0, len * 2); break;
+				case ma_format_s24: memset(pOutput, 0, len * 3); break;
+				case ma_format_s32: memset(pOutput, 0, len * 4); break;
+				case ma_format_f32: memset(pOutput, 0, len * 4); break;
+			};
+		}
+
+		(void)pInput;
+	}
 	bool VideoTexture::AudioReaderOpen(VideoReaderState* state, const std::filesystem::path& filepath)
 	{
 		// Unpack members of state
@@ -553,8 +518,8 @@ namespace Nutcrackz {
 
 		// Find the first valid video stream inside file!
 		audioStreamIndex = -1;
-		AVCodecParameters* avAudioCodecParams;
-		AVCodec* avAudioCodec;
+		AVCodecParameters* avAudioCodecParams = nullptr;
+		AVCodec* avAudioCodec = nullptr;
 
 		for (unsigned int i = 0; i < avFormatContext->nb_streams; ++i)
 		{
@@ -715,6 +680,8 @@ namespace Nutcrackz {
 				ma_device_uninit(&m_AudioDevice);
 				return false;
 			}
+
+			m_AudioDevice.masterVolumeFactor = m_Volume / 100.0f;
 
 			swr_free(&swrContext);
 
@@ -918,6 +885,22 @@ namespace Nutcrackz {
 			if (state->VideoCodecContext)
 				avcodec_free_context(&state->VideoCodecContext);
 
+			state->VideoStreamIndex = -1;
+
+			delete state->VideoFormatContext;
+			state->VideoFormatContext = nullptr;
+			
+			delete state->VideoFrame;
+			state->VideoFrame = nullptr;
+			
+			delete state->VideoPacket;
+			state->VideoPacket = nullptr;
+
+			delete state->VideoCodecContext;
+			state->VideoCodecContext = nullptr;
+
+			state->VideoStream = nullptr;
+
 			m_IsVideoLoaded = false;
 		}
 	}
@@ -931,8 +914,6 @@ namespace Nutcrackz {
 			return;
 		}
 
-		m_AudioStopped = true;
-
 		if (m_HasLoadedAudio)
 		{
 			avformat_close_input(&state->AudioFormatContext);
@@ -943,6 +924,23 @@ namespace Nutcrackz {
 			av_audio_fifo_free(state->AudioFifo);
 			ma_device_uninit(&m_AudioDevice);
 
+			state->AudioStreamIndex = -1;
+
+			delete state->AudioFormatContext;
+			state->AudioFormatContext = nullptr;
+
+			delete state->AudioFrame;
+			state->AudioFrame = nullptr;
+
+			delete state->AudioPacket;
+			state->AudioPacket = nullptr;
+
+			delete state->AudioCodecContext;
+			state->AudioCodecContext = nullptr;
+
+			state->AudioStream = nullptr;
+			state->AudioFifo = nullptr;
+
 			m_HasLoadedAudio = false;
 		}
 	}
@@ -951,15 +949,13 @@ namespace Nutcrackz {
 	{
 		if (!m_HasLoadedAudio)
 		{
-			if (!AudioReaderOpen(&m_VideoState, m_VideoPath))
+			if (!AudioReaderOpen(&m_VideoState, m_VideoState.FilePath))
 			{
 				NZ_CORE_WARN("Couldn't load video file!");
 				return;
 			}
 
-			m_AudioStopped = false;
 			m_InitializedAudio = true;
-
 			m_HasLoadedAudio = true;
 		}
 
@@ -991,10 +987,11 @@ namespace Nutcrackz {
 		state->AudioPacketDuration = 0;
 	}
 
-	VideoReaderState VideoTexture::GetVideoState()
+	void VideoTexture::SetVolumeFactor(float volume)
 	{
-		return m_VideoState;
-	};
+		m_Volume = volume;
+		m_AudioDevice.masterVolumeFactor = m_Volume / 100.0f;
+	}
 
 	void VideoTexture::SetWidth(uint32_t width)
 	{
@@ -1011,11 +1008,11 @@ namespace Nutcrackz {
 		m_RendererID = id;
 	}
 
-	void VideoTexture::SetData(void* data, uint32_t size)
+	void VideoTexture::SetData(Buffer data)
 	{
 		//NZ_PROFILE_FUNCTION();
 
-		glTextureSubImage2D(m_RendererID, 0, 0, 0, m_Width, m_Height, GL_RGBA, GL_UNSIGNED_BYTE, data);
+		glTextureSubImage2D(m_RendererID, 0, 0, 0, m_Width, m_Height, GL_RGBA, GL_UNSIGNED_BYTE, data.Data);
 	}
 
 	void VideoTexture::Bind(uint32_t slot) const
@@ -1025,14 +1022,9 @@ namespace Nutcrackz {
 		glBindTextureUnit(slot, m_RendererID);
 	}
 
-	Ref<VideoTexture> VideoTexture::Create(const TextureSpecification& specification)
+	Ref<VideoTexture> VideoTexture::Create(const TextureSpecification& specification, Buffer data, const VideoReaderState& state)
 	{
-		return CreateRef<VideoTexture>(specification);
-	}
-
-	Ref<VideoTexture> VideoTexture::Create(const std::string& path, uint8_t* frameData)
-	{
-		return CreateRef<VideoTexture>(path, frameData);
+		return CreateRef<VideoTexture>(specification, data, state);
 	}
 
 }

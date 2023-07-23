@@ -7,13 +7,13 @@
 #include "miniaudio.h"
 
 extern "C" {
-	#include <libavcodec/avcodec.h>
-	#include <libavformat/avformat.h>
-	#include <libswscale/swscale.h>
-	#include <libavutil/error.h>
-	#include <libavutil/avutil.h>
-	#include <libswresample/swresample.h>
-	#include <libavutil/audio_fifo.h>
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libswscale/swscale.h>
+#include <libavutil/error.h>
+#include <libavutil/avutil.h>
+#include <libswresample/swresample.h>
+#include <libavutil/audio_fifo.h>
 }
 
 #include <filesystem>
@@ -22,6 +22,7 @@ namespace Nutcrackz {
 
 	struct VideoReaderState
 	{
+		std::filesystem::path FilePath = "";
 		int Width, Height;
 		double Duration;
 		int64_t VideoPacketDuration = 0;
@@ -50,10 +51,12 @@ namespace Nutcrackz {
 	class VideoTexture : public Asset
 	{
 	public:
-		VideoTexture(const TextureSpecification& specification);
-		VideoTexture(const std::string& path, uint8_t* frameData);
-		
+		VideoTexture(const TextureSpecification& specification, Buffer data = Buffer(), const VideoReaderState& state = VideoReaderState());
+
 		~VideoTexture();
+
+		static AssetType GetStaticType() { return AssetType::Video; }
+		virtual AssetType GetType() const { return GetStaticType(); }
 
 		uint32_t GetIDFromTexture(uint8_t* frameData, int64_t* pts, bool isPaused);
 		void DeleteRendererID(const uint32_t& rendererID);
@@ -72,8 +75,13 @@ namespace Nutcrackz {
 		void ReadAndPlayAudio(VideoReaderState* state, int64_t ts, bool seek, bool isPaused);
 		void ResetAudioPacketDuration(VideoReaderState* state);
 
-		static VideoReaderState GetVideoState();
+		float GetVolumeFactor() { return m_Volume; }
+		void SetVolumeFactor(float volume);
 
+		VideoReaderState& GetVideoState() { return m_VideoState; }
+		void SetVideoState(const VideoReaderState& state) { m_VideoState = state; }
+
+		bool GetHasLoadedAudio() { return m_HasLoadedAudio; }
 		uint32_t GetWidth() const { return m_Width; }
 		uint32_t GetHeight() const { return m_Height; }
 		uint32_t GetRendererID() const { return m_RendererID; }
@@ -81,14 +89,7 @@ namespace Nutcrackz {
 		void SetWidth(uint32_t width);
 		void SetHeight(uint32_t height);
 		void SetRendererID(uint32_t id);
-
-		const std::string& GetVideoPath() const { return m_VideoPath; }
-		void SetVideoPath(const std::string& path) { m_VideoPath = path; }
-
-		bool IsLoaded() const { return m_IsLoaded; }
-		void SetLinear(bool value) { m_Specification.UseLinear = value; }
-
-		void SetData(void* data, uint32_t size);
+		void SetData(Buffer data);
 
 		void Bind(uint32_t slot = 0) const;
 
@@ -97,28 +98,22 @@ namespace Nutcrackz {
 			return m_RendererID == other.GetRendererID();
 		}
 
-		static Ref<VideoTexture> Create(const TextureSpecification& specification);
-		static Ref<VideoTexture> Create(const std::string& path, uint8_t* frameData);
-
-		static AssetType GetStaticType() { return AssetType::TextureVideo; }
-		virtual AssetType GetType() const { return GetStaticType(); }
+		static Ref<VideoTexture> Create(const TextureSpecification& specification, Buffer data = Buffer(), const VideoReaderState& state = VideoReaderState());
 
 	private:
 		TextureSpecification m_Specification;
-		std::string m_VideoPath;
 		uint32_t m_Width, m_Height;
 		uint32_t m_RendererID = 0;
 		uint32_t m_InternalFormat, m_DataFormat;
 
-		bool m_IsLoaded = false;
+		VideoReaderState m_VideoState;
 
-		inline static VideoReaderState m_VideoState;
-		inline static bool m_IsVideoLoaded = false;
-		inline static bool m_HasLoadedAudio = false;
+		bool m_IsVideoLoaded = false;
+		bool m_HasLoadedAudio = false;
+		bool m_InitializedAudio = false;
 
-		inline static bool m_InitializedAudio = false;
-		inline static bool m_AudioStopped = false;
 		ma_device m_AudioDevice;
+		float m_Volume = 100.0f;
 	};
 
 }

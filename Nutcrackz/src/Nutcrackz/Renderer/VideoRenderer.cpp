@@ -10,14 +10,6 @@
 
 namespace Nutcrackz {
 
-	bool VideoRenderer::m_HasInitializedTimer = false;
-	double VideoRenderer::m_RestartPointFromPause = 0.0;
-	double VideoRenderer::m_PresentationTimeInSeconds = 0.0;
-	double VideoRenderer::m_VideoDuration = 0.0;
-	bool VideoRenderer::m_IsRenderingVideo = false;
-	int64_t VideoRenderer::m_FramePosition = 0;
-	bool VideoRenderer::m_SeekAudio = false;
-
 	struct VideoVertex
 	{
 		glm::vec3 Position;
@@ -25,6 +17,7 @@ namespace Nutcrackz {
 		glm::vec2 TexCoord;
 		glm::vec2 TilingFactor;
 		float TexIndex;
+		float Saturation;
 
 		// Editor-only
 		int EntityID;
@@ -57,8 +50,11 @@ namespace Nutcrackz {
 			glm::mat4 ViewProjection;
 		};
 
+		glm::mat4 m_CameraView;
 		CameraData CameraBuffer;
 		Ref<UniformBuffer> CameraUniformBuffer;
+
+		bool UseBillboard = false;
 	};
 
 	static VideoRendererData s_VideoData;
@@ -69,12 +65,13 @@ namespace Nutcrackz {
 
 		s_VideoData.VideoVertexBuffer = VertexBuffer::Create(s_VideoData.MaxVertices * sizeof(VideoVertex));
 		s_VideoData.VideoVertexBuffer->SetLayout({
-			{ ShaderDataType::Float3, "a_Position"              },
-			{ ShaderDataType::Float4, "a_Color"                 },
-			{ ShaderDataType::Float2, "a_TexCoord"              },
-			{ ShaderDataType::Float2, "a_TilingFactor"          },
-			{ ShaderDataType::Float,  "a_TexIndex"              },
-			{ ShaderDataType::Int,    "a_EntityID"              }
+			{ ShaderDataType::Float3, "a_Position"     },
+			{ ShaderDataType::Float4, "a_Color"        },
+			{ ShaderDataType::Float2, "a_TexCoord"     },
+			{ ShaderDataType::Float2, "a_TilingFactor" },
+			{ ShaderDataType::Float,  "a_TexIndex"     },
+			{ ShaderDataType::Float,  "a_Saturation"   },
+			{ ShaderDataType::Int,    "a_EntityID"     }
 		});
 		s_VideoData.VideoVertexArray->AddVertexBuffer(s_VideoData.VideoVertexBuffer);
 
@@ -102,9 +99,10 @@ namespace Nutcrackz {
 
 		s_VideoData.WhiteVideoTexture = VideoTexture::Create(TextureSpecification());
 		uint32_t whiteVideoTextureData = 0xffffffff;
-		s_VideoData.WhiteVideoTexture->SetData(&whiteVideoTextureData, sizeof(uint32_t));
+		s_VideoData.WhiteVideoTexture->SetData(Buffer(&whiteVideoTextureData, sizeof(uint32_t)));
 
-		s_VideoData.VideoShader = Shader::Create("assets/shaders/Renderer2D_Quad.glsl");
+		//s_VideoData.VideoShader = Shader::Create("assets/shaders/Renderer2D_Quad.glsl");
+		s_VideoData.VideoShader = Shader::Create("assets/shaders/Renderer2D_Quad_BlackWhite.glsl");
 
 		// Set first texture slot to 0
 		s_VideoData.VideoTextureSlots[0] = s_VideoData.WhiteVideoTexture;
@@ -120,7 +118,7 @@ namespace Nutcrackz {
 	void VideoRenderer::Shutdown()
 	{
 		//NZ_PROFILE_FUNCTION();
-		 
+
 		delete[] s_VideoData.VideoVertexBufferBase;
 	}
 
@@ -128,6 +126,7 @@ namespace Nutcrackz {
 	{
 		//NZ_PROFILE_FUNCTION();
 
+		s_VideoData.m_CameraView = glm::inverse(transform);
 		s_VideoData.CameraBuffer.ViewProjection = camera.GetProjection() * glm::inverse(transform);
 		s_VideoData.CameraUniformBuffer->SetData(&s_VideoData.CameraBuffer, sizeof(VideoRendererData::CameraData));
 
@@ -138,6 +137,7 @@ namespace Nutcrackz {
 	{
 		//NZ_PROFILE_FUNCTION();
 
+		s_VideoData.m_CameraView = camera.GetViewMatrix();
 		s_VideoData.CameraBuffer.ViewProjection = camera.GetViewProjection();
 		s_VideoData.CameraUniformBuffer->SetData(&s_VideoData.CameraBuffer, sizeof(VideoRendererData::CameraData));
 
@@ -166,7 +166,7 @@ namespace Nutcrackz {
 			}
 
 			s_VideoData.VideoShader->Bind();
-			RenderCommand::DrawIndexed(s_VideoData.VideoVertexArray, s_VideoData.VideoIndexCount);
+			RenderCommand::DrawIndexed(s_VideoData.VideoVertexArray, s_VideoData.VideoIndexCount, s_VideoData.UseBillboard);
 		}
 	}
 
@@ -253,60 +253,62 @@ namespace Nutcrackz {
 
 #pragma endregion
 
-	void VideoRenderer::RenderVideo(const glm::mat4& transform, VideoRendererComponent& src, int entityID)
+	void VideoRenderer::RenderVideo(TransformComponent& transform, const Ref<VideoTexture>& texture, VideoRendererComponent& src, VideoData& data, int entityID)
 	{
-		if (!m_HasInitializedTimer)
+		NZ_CORE_VERIFY(texture);
+
+		if (!data.HasInitializedTimer)
 		{
 			InitTimerWin32();
-			m_HasInitializedTimer = true;
+			data.HasInitializedTimer = true;
 		}
 
-		constexpr size_t quadVertexCount = 4;
+		constexpr size_t videoVertexCount = 4;
 		constexpr glm::vec2 textureCoords[] = { { 0.0f, 1.0f }, { 1.0f, 1.0f }, { 1.0f, 0.0f }, { 0.0f, 0.0f }, };
 
 		float textureIndex = 0.0f;
 		const glm::vec2 tilingFactor(1.0f);
 
 		// This if statement is very much required!
-		// Because without it, this function creates a big memory leak!
-		if (src.VideoRendererID)
-			src.Video->DeleteRendererID(src.VideoRendererID);
+		// Without it, this function creates a big memory leak!
+		if (data.VideoRendererID)
+			texture->DeleteRendererID(data.VideoRendererID);
 
-		if (src.Video)
+		if (texture)
 		{
-			if (src.UseVideoAudio)
+			if (!data.UseExternalAudio)
 			{
-				src.Video->ReadAndPlayAudio(&src.Video->GetVideoState(), m_FramePosition, m_SeekAudio, src.PauseVideo);
+				texture->ReadAndPlayAudio(&texture->GetVideoState(), data.FramePosition, data.SeekAudio, data.PauseVideo);
 			}
 
-			if (!m_IsRenderingVideo)
+			if (!data.IsRenderingVideo)
 			{
 				SetTime(0.0);
-				m_IsRenderingVideo = true;
+				data.IsRenderingVideo = true;
 			}
 
-			if (m_FramePosition != 0)
+			if (data.FramePosition != 0)
 			{
-				SetTime(src.FramePosition / src.Video->GetVideoState().Framerate);
+				SetTime(data.FramePosition / texture->GetVideoState().Framerate);
 
-				if (!src.Video->VideoReaderSeekFrame(&src.Video->GetVideoState(), m_FramePosition))
+				if (!texture->VideoReaderSeekFrame(&texture->GetVideoState(), data.FramePosition))
 				{
 					NZ_CORE_WARN("Could not seek video back to start frame!");
 					return;
 				}
 
-				src.PresentationTimeStamp = m_FramePosition;
-				m_FramePosition = 0;
+				data.PresentationTimeStamp = data.FramePosition;
+				data.FramePosition = 0;
 			}
 
-			src.VideoRendererID = src.Video->GetIDFromTexture(src.VideoFrameData, &src.PresentationTimeStamp, src.PauseVideo);
-			src.Video->SetRendererID(src.VideoRendererID);
+			data.VideoRendererID = texture->GetIDFromTexture(data.VideoFrameData, &data.PresentationTimeStamp, data.PauseVideo);
+			texture->SetRendererID(data.VideoRendererID);
 
-			if (src.PauseVideo)
+			if (data.PauseVideo)
 			{
-				if (src.UseVideoAudio)
+				if (!data.UseExternalAudio)
 				{
-					if (!src.Video->AVReaderSeekFrame(&src.Video->GetVideoState(), src.PresentationTimeStamp))
+					if (!texture->AVReaderSeekFrame(&texture->GetVideoState(), data.PresentationTimeStamp))
 					{
 						NZ_CORE_WARN("Could not seek a/v back to start frame!");
 						return;
@@ -314,7 +316,7 @@ namespace Nutcrackz {
 				}
 				else
 				{
-					if (!src.Video->VideoReaderSeekFrame(&src.Video->GetVideoState(), src.PresentationTimeStamp))
+					if (!texture->VideoReaderSeekFrame(&texture->GetVideoState(), data.PresentationTimeStamp))
 					{
 						NZ_CORE_WARN("Could not seek video back to start frame!");
 						return;
@@ -323,66 +325,68 @@ namespace Nutcrackz {
 
 				SetTime(0.0);
 			}
-			else if (!src.PauseVideo)
+			else if (!data.PauseVideo)
 			{
-				if (m_RestartPointFromPause > GetTime())
-					SetTime(m_RestartPointFromPause);
+				if (data.RestartPointFromPause > GetTime())
+					SetTime(data.RestartPointFromPause);
 
-				if (m_RestartPointFromPause < GetTime())
-					m_RestartPointFromPause = GetTime();
+				if (data.RestartPointFromPause < GetTime())
+					data.RestartPointFromPause = GetTime();
 
-				m_PresentationTimeInSeconds = src.PresentationTimeStamp * ((double)src.Video->GetVideoState().TimeBase.num / (double)src.Video->GetVideoState().TimeBase.den);
-				
-				int hoursToSeconds = src.Video->GetVideoState().Hours * 3600;
-				int minutesToSeconds = src.Video->GetVideoState().Mins * 60;
-				
-				if (m_VideoDuration != hoursToSeconds + minutesToSeconds + src.Video->GetVideoState().Secs + (0.01 * ((100 * src.Video->GetVideoState().Us) / AV_TIME_BASE)))
-					m_VideoDuration = hoursToSeconds + minutesToSeconds + src.Video->GetVideoState().Secs + (0.01 * ((100 * src.Video->GetVideoState().Us) / AV_TIME_BASE));
+				data.PresentationTimeInSeconds = data.PresentationTimeStamp * ((double)texture->GetVideoState().TimeBase.num / (double)texture->GetVideoState().TimeBase.den);
 
-				if (src.Hours != src.Video->GetVideoState().Hours)
-					src.Hours = src.Video->GetVideoState().Hours;
+				int hoursToSeconds = texture->GetVideoState().Hours * 3600;
+				int minutesToSeconds = texture->GetVideoState().Mins * 60;
 
-				if (src.Minutes != src.Video->GetVideoState().Mins)
-					src.Minutes = src.Video->GetVideoState().Mins;
+				if (data.VideoDuration != hoursToSeconds + minutesToSeconds + texture->GetVideoState().Secs + (0.01 * ((100 * texture->GetVideoState().Us) / AV_TIME_BASE)))
+					data.VideoDuration = hoursToSeconds + minutesToSeconds + texture->GetVideoState().Secs + (0.01 * ((100 * texture->GetVideoState().Us) / AV_TIME_BASE));
 
-				if (src.Seconds != src.Video->GetVideoState().Secs)
-					src.Seconds = src.Video->GetVideoState().Secs;
+				if (data.Hours != texture->GetVideoState().Hours)
+					data.Hours = texture->GetVideoState().Hours;
 
-				if (src.Milliseconds != src.Video->GetVideoState().Us)
-					src.Milliseconds = src.Video->GetVideoState().Us;
+				if (data.Minutes != texture->GetVideoState().Mins)
+					data.Minutes = texture->GetVideoState().Mins;
 
-				NZ_CORE_WARN("Presentation timestamp = {0}, Timebase num/den = {1}", src.PresentationTimeStamp, ((double)src.Video->GetVideoState().TimeBase.num / (double)src.Video->GetVideoState().TimeBase.den));
-				
-				while (m_PresentationTimeInSeconds > GetTime())
+				if (data.Seconds != texture->GetVideoState().Secs)
+					data.Seconds = texture->GetVideoState().Secs;
+
+				if (data.Milliseconds != texture->GetVideoState().Us)
+					data.Milliseconds = texture->GetVideoState().Us;
+
+				while (data.PresentationTimeInSeconds > GetTime())
 				{
-					Sleep(m_PresentationTimeInSeconds - GetTime());
+					Sleep(data.PresentationTimeInSeconds - GetTime());
 				}
 
-				if (src.RepeatVideo && GetTime() > m_VideoDuration)
+				if (data.RepeatVideo && GetTime() >= data.VideoDuration)
 				{
-					if (src.UseVideoAudio)
+					if (!data.UseExternalAudio)
 					{
-						src.Video->CloseAudio(&src.Video->GetVideoState());
-
-						if (!src.Video->AVReaderSeekFrame(&src.Video->GetVideoState(), 0, true))
+						if (!texture->AVReaderSeekFrame(&texture->GetVideoState(), 0, true))
 						{
-							NZ_CORE_WARN("Could not seek a/v back to start frame!");
+							NZ_CORE_WARN("Could not seek audio/video back to start frame!");
 							return;
 						}
+
+						texture->CloseAudio(&texture->GetVideoState());
 					}
 					else
 					{
-						if (!src.Video->VideoReaderSeekFrame(&src.Video->GetVideoState(), 0))
+						if (!texture->VideoReaderSeekFrame(&texture->GetVideoState(), 0))
 						{
 							NZ_CORE_WARN("Could not seek video back to start frame!");
 							return;
 						}
 					}
 
-					src.PresentationTimeStamp = 0;
-					src.FramePosition = 0;
+					data.SeekAudio = true;
+					texture->DeleteRendererID(data.VideoRendererID);
+					texture->CloseVideo(&texture->GetVideoState());
+					data.VideoRendererID = texture->GetIDFromTexture(data.VideoFrameData, &data.PresentationTimeStamp, data.PauseVideo);
+					texture->SetRendererID(data.VideoRendererID);
+					data.PresentationTimeStamp = 0;
 					SetTime(0.0);
-					m_RestartPointFromPause = 0.0;
+					data.RestartPointFromPause = 0.0;
 				}
 			}
 
@@ -391,7 +395,7 @@ namespace Nutcrackz {
 
 			for (uint32_t i = 1; i < s_VideoData.VideoTextureSlotIndex; i++)
 			{
-				if (*s_VideoData.VideoTextureSlots[i] == *src.Video)
+				if (*s_VideoData.VideoTextureSlots[i] == *texture)
 				{
 					textureIndex = (float)i;
 					break;
@@ -405,30 +409,52 @@ namespace Nutcrackz {
 
 				textureIndex = (float)s_VideoData.VideoTextureSlotIndex;
 
-				if (src.Video)
-					s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = src.Video;
+				if (texture)
+					s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = texture;
 				else
 					s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = s_VideoData.WhiteVideoTexture;
 
 				s_VideoData.VideoTextureSlotIndex++;
 			}
 		}
-		
-		for (size_t i = 0; i < quadVertexCount; i++)
+
+		if (data.UseBillboard)
 		{
-			s_VideoData.VideoVertexBufferPtr->Position = transform * s_VideoData.QuadVertexPositions[i];
-			s_VideoData.VideoVertexBufferPtr->Color = src.Color;
-			s_VideoData.VideoVertexBufferPtr->TexCoord = textureCoords[i];
-			s_VideoData.VideoVertexBufferPtr->TilingFactor = tilingFactor;
-			s_VideoData.VideoVertexBufferPtr->TexIndex = textureIndex;
-			s_VideoData.VideoVertexBufferPtr->EntityID = entityID;
-			s_VideoData.VideoVertexBufferPtr++;
+			glm::vec3 camRightWS = { s_VideoData.m_CameraView[0][0], s_VideoData.m_CameraView[1][0], s_VideoData.m_CameraView[2][0] };
+			glm::vec3 camUpWS = { s_VideoData.m_CameraView[0][1], s_VideoData.m_CameraView[1][1], s_VideoData.m_CameraView[2][1] };
+			glm::vec3 position = { transform.Translation.x, transform.Translation.y, transform.Translation.z };
+
+			for (size_t i = 0; i < videoVertexCount; i++)
+			{
+				s_VideoData.VideoVertexBufferPtr->Position = position + camRightWS * (s_VideoData.QuadVertexPositions[i].x) * transform.Scale.x + camUpWS * s_VideoData.QuadVertexPositions[i].y * transform.Scale.y;
+				s_VideoData.VideoVertexBufferPtr->Color = src.Color;
+				s_VideoData.VideoVertexBufferPtr->TexCoord = textureCoords[i];
+				s_VideoData.VideoVertexBufferPtr->TilingFactor = tilingFactor;
+				s_VideoData.VideoVertexBufferPtr->TexIndex = textureIndex;
+				s_VideoData.VideoVertexBufferPtr->Saturation = src.Saturation;
+				s_VideoData.VideoVertexBufferPtr->EntityID = entityID;
+				s_VideoData.VideoVertexBufferPtr++;
+			}
+		}
+		else
+		{
+			for (size_t i = 0; i < videoVertexCount; i++)
+			{
+				s_VideoData.VideoVertexBufferPtr->Position = transform.GetTransform() * s_VideoData.QuadVertexPositions[i];
+				s_VideoData.VideoVertexBufferPtr->Color = src.Color;
+				s_VideoData.VideoVertexBufferPtr->TexCoord = textureCoords[i];
+				s_VideoData.VideoVertexBufferPtr->TilingFactor = tilingFactor;
+				s_VideoData.VideoVertexBufferPtr->TexIndex = textureIndex;
+				s_VideoData.VideoVertexBufferPtr->Saturation = src.Saturation;
+				s_VideoData.VideoVertexBufferPtr->EntityID = entityID;
+				s_VideoData.VideoVertexBufferPtr++;
+			}
 		}
 
 		s_VideoData.VideoIndexCount += 6;
 	}
 
-	void VideoRenderer::RenderFrame(const glm::mat4& transform, VideoRendererComponent& src, int entityID)
+	void VideoRenderer::RenderFrame(TransformComponent& transform, const Ref<VideoTexture>& texture, VideoRendererComponent& src, VideoData& data, int entityID)
 	{
 		constexpr size_t videoVertexCount = 4;
 		float textureIndex = 0.0f;
@@ -437,67 +463,75 @@ namespace Nutcrackz {
 
 		constexpr glm::vec2 textureCoords[] = { { 0.0f, 1.0f }, { 1.0f, 1.0f }, { 1.0f, 0.0f }, { 0.0f, 0.0f } };
 
-		if (src.Video)
+		if (texture)
 		{
-			if (m_FramePosition != src.FramePosition * src.Video->GetVideoState().VideoPacketDuration)
-			{
-				m_FramePosition = src.FramePosition * src.Video->GetVideoState().VideoPacketDuration;
-			}
+			if (data.FramePosition != data.FramePosition * texture->GetVideoState().VideoPacketDuration)
+				data.FramePosition = data.FramePosition * texture->GetVideoState().VideoPacketDuration;
 
-			if (m_IsRenderingVideo)
+			if (texture->GetHasLoadedAudio())
 			{
-				if (src.UseVideoAudio)
+				if (!data.UseExternalAudio)
 				{
-					if (!src.Video->AVReaderSeekFrame(&src.Video->GetVideoState(), 0, true))
+					if (!texture->AVReaderSeekFrame(&texture->GetVideoState(), 0, true))
 					{
 						NZ_CORE_WARN("Could not seek a/v back to start frame!");
 						return;
 					}
 
-					src.Video->CloseAudio(&src.Video->GetVideoState());
+					texture->CloseAudio(&texture->GetVideoState());
 				}
 				else
 				{
-					if (!src.Video->VideoReaderSeekFrame(&src.Video->GetVideoState(), 0))
+					if (!texture->VideoReaderSeekFrame(&texture->GetVideoState(), 0))
 					{
 						NZ_CORE_WARN("Could not seek video back to start frame!");
 						return;
 					}
 				}
 
-				src.Video->DeleteRendererID(src.VideoRendererID);
-				src.Video->CloseVideo(&src.Video->GetVideoState());
-				src.VideoRendererID = src.Video->GetIDFromTexture(src.VideoFrameData, &src.PresentationTimeStamp, src.PauseVideo);
-				src.Video->SetRendererID(src.VideoRendererID);
-
-				m_SeekAudio = true;
-				src.PresentationTimeStamp = 0;
+				data.SeekAudio = true;
+				texture->DeleteRendererID(data.VideoRendererID);
+				texture->CloseVideo(&texture->GetVideoState());
+				data.VideoRendererID = texture->GetIDFromTexture(data.VideoFrameData, &data.PresentationTimeStamp, data.PauseVideo);
+				texture->SetRendererID(data.VideoRendererID);
+				data.PresentationTimeStamp = 0;
 				SetTime(0.0);
-				m_RestartPointFromPause = 0.0;
-				m_IsRenderingVideo = false;
+				data.RestartPointFromPause = 0.0;
 			}
 
-			if (src.NumberOfFrames != src.Video->GetVideoState().NumberOfFrames)
-				src.NumberOfFrames = src.Video->GetVideoState().NumberOfFrames;
+			if (data.IsRenderingVideo)
+			{
+				texture->DeleteRendererID(data.VideoRendererID);
+				texture->CloseVideo(&texture->GetVideoState());
+				data.VideoRendererID = texture->GetIDFromTexture(data.VideoFrameData, &data.PresentationTimeStamp, data.PauseVideo);
+				texture->SetRendererID(data.VideoRendererID);
+				data.PresentationTimeStamp = 0;
+				SetTime(0.0);
+				data.RestartPointFromPause = 0.0;
+				data.IsRenderingVideo = false;
+			}
 
-			if (src.Hours != src.Video->GetVideoState().Hours)
-				src.Hours = src.Video->GetVideoState().Hours;
+			if (data.NumberOfFrames != texture->GetVideoState().NumberOfFrames)
+				data.NumberOfFrames = texture->GetVideoState().NumberOfFrames;
 
-			if (src.Minutes != src.Video->GetVideoState().Mins)
-				src.Minutes = src.Video->GetVideoState().Mins;
+			if (data.Hours != texture->GetVideoState().Hours)
+				data.Hours = texture->GetVideoState().Hours;
 
-			if (src.Seconds != src.Video->GetVideoState().Secs)
-				src.Seconds = src.Video->GetVideoState().Secs;
+			if (data.Minutes != texture->GetVideoState().Mins)
+				data.Minutes = texture->GetVideoState().Mins;
 
-			if (src.Milliseconds != src.Video->GetVideoState().Us)
-				src.Milliseconds = src.Video->GetVideoState().Us;
+			if (data.Seconds != texture->GetVideoState().Secs)
+				data.Seconds = texture->GetVideoState().Secs;
+
+			if (data.Milliseconds != texture->GetVideoState().Us)
+				data.Milliseconds = texture->GetVideoState().Us;
 
 			if (s_VideoData.VideoIndexCount >= VideoRendererData::MaxIndices)
 				NextBatch();
 
 			for (uint32_t i = 1; i < s_VideoData.VideoTextureSlotIndex; i++)
 			{
-				if (*s_VideoData.VideoTextureSlots[i] == *src.Video)
+				if (*s_VideoData.VideoTextureSlots[i] == *texture)
 				{
 					textureIndex = (float)i;
 					break;
@@ -511,10 +545,8 @@ namespace Nutcrackz {
 
 				textureIndex = (float)s_VideoData.VideoTextureSlotIndex;
 
-				if (src.Video)
-				{
-					s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = src.Video;
-				}
+				if (texture)
+					s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = texture;
 				else
 					s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = s_VideoData.WhiteVideoTexture;
 
@@ -522,22 +554,46 @@ namespace Nutcrackz {
 			}
 		}
 
-		for (size_t i = 0; i < videoVertexCount; i++)
+		if (data.UseBillboard)
 		{
-			s_VideoData.VideoVertexBufferPtr->Position = transform * s_VideoData.QuadVertexPositions[i];
-			s_VideoData.VideoVertexBufferPtr->Color = src.Color;
-			s_VideoData.VideoVertexBufferPtr->TexCoord = textureCoords[i];
-			s_VideoData.VideoVertexBufferPtr->TilingFactor = tilingFactor;
-			s_VideoData.VideoVertexBufferPtr->TexIndex = textureIndex;
-			s_VideoData.VideoVertexBufferPtr->EntityID = entityID;
-			s_VideoData.VideoVertexBufferPtr++;
+			glm::vec3 camRightWS = { s_VideoData.m_CameraView[0][0], s_VideoData.m_CameraView[1][0], s_VideoData.m_CameraView[2][0] };
+			glm::vec3 camUpWS = { s_VideoData.m_CameraView[0][1], s_VideoData.m_CameraView[1][1], s_VideoData.m_CameraView[2][1] };
+			glm::vec3 position = { transform.Translation.x, transform.Translation.y, transform.Translation.z };
+
+			for (size_t i = 0; i < videoVertexCount; i++)
+			{
+				s_VideoData.VideoVertexBufferPtr->Position = position + camRightWS * (s_VideoData.QuadVertexPositions[i].x) * transform.Scale.x + camUpWS * s_VideoData.QuadVertexPositions[i].y * transform.Scale.y;
+				s_VideoData.VideoVertexBufferPtr->Color = src.Color;
+				s_VideoData.VideoVertexBufferPtr->TexCoord = textureCoords[i];
+				s_VideoData.VideoVertexBufferPtr->TilingFactor = tilingFactor;
+				s_VideoData.VideoVertexBufferPtr->TexIndex = textureIndex;
+				s_VideoData.VideoVertexBufferPtr->Saturation = src.Saturation;
+				s_VideoData.VideoVertexBufferPtr->EntityID = entityID;
+				s_VideoData.VideoVertexBufferPtr++;
+			}
+		}
+		else
+		{
+			for (size_t i = 0; i < videoVertexCount; i++)
+			{
+				s_VideoData.VideoVertexBufferPtr->Position = transform.GetTransform() * s_VideoData.QuadVertexPositions[i];
+				s_VideoData.VideoVertexBufferPtr->Color = src.Color;
+				s_VideoData.VideoVertexBufferPtr->TexCoord = textureCoords[i];
+				s_VideoData.VideoVertexBufferPtr->TilingFactor = tilingFactor;
+				s_VideoData.VideoVertexBufferPtr->TexIndex = textureIndex;
+				s_VideoData.VideoVertexBufferPtr->Saturation = src.Saturation;
+				s_VideoData.VideoVertexBufferPtr->EntityID = entityID;
+				s_VideoData.VideoVertexBufferPtr++;
+			}
 		}
 
 		s_VideoData.VideoIndexCount += 6;
 	}
 
-	void VideoRenderer::RenderCertainFrame(const glm::mat4& transform, VideoRendererComponent& src, int entityID)
+	void VideoRenderer::RenderCertainFrame(TransformComponent& transform, const Ref<VideoTexture>& texture, VideoRendererComponent& src, VideoData& data, int entityID)
 	{
+		NZ_CORE_VERIFY(texture);
+
 		constexpr size_t videoVertexCount = 4;
 		float textureIndex = 0.0f;
 
@@ -545,57 +601,62 @@ namespace Nutcrackz {
 
 		constexpr glm::vec2 textureCoords[] = { { 0.0f, 1.0f }, { 1.0f, 1.0f }, { 1.0f, 0.0f }, { 0.0f, 0.0f } };
 
-		if (src.Video)
+		if (texture)
 		{
-			if (src.NumberOfFrames != src.Video->GetVideoState().NumberOfFrames)
-				src.NumberOfFrames = src.Video->GetVideoState().NumberOfFrames;
+			if (data.NumberOfFrames != texture->GetVideoState().NumberOfFrames)
+				data.NumberOfFrames = texture->GetVideoState().NumberOfFrames;
 
-			if (src.Hours != src.Video->GetVideoState().Hours)
-				src.Hours = src.Video->GetVideoState().Hours;
+			if (data.Hours != texture->GetVideoState().Hours)
+				data.Hours = texture->GetVideoState().Hours;
 
-			if (src.Minutes != src.Video->GetVideoState().Mins)
-				src.Minutes = src.Video->GetVideoState().Mins;
+			if (data.Minutes != texture->GetVideoState().Mins)
+				data.Minutes = texture->GetVideoState().Mins;
 
-			if (src.Seconds != src.Video->GetVideoState().Secs)
-				src.Seconds = src.Video->GetVideoState().Secs;
+			if (data.Seconds != texture->GetVideoState().Secs)
+				data.Seconds = texture->GetVideoState().Secs;
 
-			if (src.Milliseconds != src.Video->GetVideoState().Us)
-				src.Milliseconds = src.Video->GetVideoState().Us;
+			if (data.Milliseconds != texture->GetVideoState().Us)
+				data.Milliseconds = texture->GetVideoState().Us;
 
-			if (m_FramePosition != src.FramePosition * src.Video->GetVideoState().VideoPacketDuration)
+			if (data.FramePosition != data.FramePosition * texture->GetVideoState().VideoPacketDuration)
 			{
-				if (m_IsRenderingVideo)
+				if (texture->GetHasLoadedAudio())
 				{
-					if (src.UseVideoAudio)
+					if (!data.UseExternalAudio)
 					{
-						src.Video->CloseAudio(&src.Video->GetVideoState());
+						texture->CloseAudio(&texture->GetVideoState());
 
-						if (!src.Video->AVReaderSeekFrame(&src.Video->GetVideoState(), 0, true))
+						if (!texture->AVReaderSeekFrame(&texture->GetVideoState(), 0, true))
 						{
 							NZ_CORE_WARN("Could not seek a/v back to start frame!");
 							return;
 						}
 					}
 
-					m_SeekAudio = true;
+					data.SeekAudio = true;
 					SetTime(0.0);
-					m_RestartPointFromPause = 0.0;
-					m_IsRenderingVideo = false;
+					data.RestartPointFromPause = 0.0;
 				}
 
-				m_FramePosition = src.FramePosition * src.Video->GetVideoState().VideoPacketDuration;
+				if (data.IsRenderingVideo)
+				{
+					SetTime(0.0);
+					data.RestartPointFromPause = 0.0;
+					data.IsRenderingVideo = false;
+				}
 
-				if (!src.Video->VideoReaderSeekFrame(&src.Video->GetVideoState(), m_FramePosition))
+				data.FramePosition = data.FramePosition * texture->GetVideoState().VideoPacketDuration;
+
+				if (!texture->VideoReaderSeekFrame(&texture->GetVideoState(), data.FramePosition))
 				{
 					NZ_CORE_WARN("Could not seek video back to start frame!");
 					return;
 				}
 
-				src.PresentationTimeStamp = m_FramePosition;
-
-				src.Video->DeleteRendererID(src.VideoRendererID);
-				src.VideoRendererID = src.Video->GetIDFromTexture(src.VideoFrameData, &src.PresentationTimeStamp, src.PauseVideo);
-				src.Video->SetRendererID(src.VideoRendererID);
+				data.PresentationTimeStamp = data.FramePosition;
+				texture->DeleteRendererID(data.VideoRendererID);
+				data.VideoRendererID = texture->GetIDFromTexture(data.VideoFrameData, &data.PresentationTimeStamp, data.PauseVideo);
+				texture->SetRendererID(data.VideoRendererID);
 			}
 
 			if (s_VideoData.VideoIndexCount >= VideoRendererData::MaxIndices)
@@ -603,7 +664,7 @@ namespace Nutcrackz {
 
 			for (uint32_t i = 1; i < s_VideoData.VideoTextureSlotIndex; i++)
 			{
-				if (*s_VideoData.VideoTextureSlots[i] == *src.Video)
+				if (*s_VideoData.VideoTextureSlots[i] == *texture)
 				{
 					textureIndex = (float)i;
 					break;
@@ -617,10 +678,8 @@ namespace Nutcrackz {
 
 				textureIndex = (float)s_VideoData.VideoTextureSlotIndex;
 
-				if (src.Video)
-				{
-					s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = src.Video;
-				}
+				if (texture)
+					s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = texture;
 				else
 					s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = s_VideoData.WhiteVideoTexture;
 
@@ -628,33 +687,60 @@ namespace Nutcrackz {
 			}
 		}
 
-		for (size_t i = 0; i < videoVertexCount; i++)
+		if (data.UseBillboard)
 		{
-			s_VideoData.VideoVertexBufferPtr->Position = transform * s_VideoData.QuadVertexPositions[i];
-			s_VideoData.VideoVertexBufferPtr->Color = src.Color;
-			s_VideoData.VideoVertexBufferPtr->TexCoord = textureCoords[i];
-			s_VideoData.VideoVertexBufferPtr->TilingFactor = tilingFactor;
-			s_VideoData.VideoVertexBufferPtr->TexIndex = textureIndex;
-			s_VideoData.VideoVertexBufferPtr->EntityID = entityID;
-			s_VideoData.VideoVertexBufferPtr++;
+			glm::vec3 camRightWS = { s_VideoData.m_CameraView[0][0], s_VideoData.m_CameraView[1][0], s_VideoData.m_CameraView[2][0] };
+			glm::vec3 camUpWS = { s_VideoData.m_CameraView[0][1], s_VideoData.m_CameraView[1][1], s_VideoData.m_CameraView[2][1] };
+			glm::vec3 position = { transform.Translation.x, transform.Translation.y, transform.Translation.z };
+
+			for (size_t i = 0; i < videoVertexCount; i++)
+			{
+				s_VideoData.VideoVertexBufferPtr->Position = position + camRightWS * (s_VideoData.QuadVertexPositions[i].x) * transform.Scale.x + camUpWS * s_VideoData.QuadVertexPositions[i].y * transform.Scale.y;
+				s_VideoData.VideoVertexBufferPtr->Color = src.Color;
+				s_VideoData.VideoVertexBufferPtr->TexCoord = textureCoords[i];
+				s_VideoData.VideoVertexBufferPtr->TilingFactor = tilingFactor;
+				s_VideoData.VideoVertexBufferPtr->TexIndex = textureIndex;
+				s_VideoData.VideoVertexBufferPtr->Saturation = src.Saturation;
+				s_VideoData.VideoVertexBufferPtr->EntityID = entityID;
+				s_VideoData.VideoVertexBufferPtr++;
+			}
+		}
+		else
+		{
+			for (size_t i = 0; i < videoVertexCount; i++)
+			{
+				s_VideoData.VideoVertexBufferPtr->Position = transform.GetTransform() * s_VideoData.QuadVertexPositions[i];
+				s_VideoData.VideoVertexBufferPtr->Color = src.Color;
+				s_VideoData.VideoVertexBufferPtr->TexCoord = textureCoords[i];
+				s_VideoData.VideoVertexBufferPtr->TilingFactor = tilingFactor;
+				s_VideoData.VideoVertexBufferPtr->TexIndex = textureIndex;
+				s_VideoData.VideoVertexBufferPtr->Saturation = src.Saturation;
+				s_VideoData.VideoVertexBufferPtr->EntityID = entityID;
+				s_VideoData.VideoVertexBufferPtr++;
+			}
 		}
 
 		s_VideoData.VideoIndexCount += 6;
 	}
 
-	void VideoRenderer::DrawVideoSprite(const glm::mat4& transform, VideoRendererComponent& src, int entityID)
+	void VideoRenderer::DrawVideoSprite(TransformComponent& transform, VideoRendererComponent& src, VideoData& data, int entityID)
 	{
-		if (src.PlayVideo)
-			RenderVideo(transform, src, entityID);
-		else if (!src.PlayVideo && src.FramePosition == 0)
-			RenderFrame(transform, src, entityID);
-		else if (!src.PlayVideo && src.FramePosition != 0)
-			RenderCertainFrame(transform, src, entityID);
+		Ref<VideoTexture> texture = AssetManager::GetAsset<VideoTexture>(src.Video);
+		if (data.PlayVideo)
+			RenderVideo(transform, texture, src, data, entityID);
+		else if (!data.PlayVideo && data.FramePosition == 0)
+			RenderFrame(transform, texture, src, data, entityID);
+		else if (!data.PlayVideo && data.FramePosition != 0)
+			RenderCertainFrame(transform, texture, src, data, entityID);
 	}
 
 	void VideoRenderer::ResetPacketDuration(VideoRendererComponent& src)
 	{
-		src.Video->ResetAudioPacketDuration(&src.Video->GetVideoState());
+		Ref<VideoTexture> texture = AssetManager::GetAsset<VideoTexture>(src.Video);
+
+		NZ_CORE_VERIFY(texture);
+
+		texture->ResetAudioPacketDuration(&texture->GetVideoState());
 	}
 
 }

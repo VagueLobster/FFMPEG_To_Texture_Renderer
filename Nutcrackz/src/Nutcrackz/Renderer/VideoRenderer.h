@@ -16,7 +16,7 @@ namespace Nutcrackz {
 		static void EndScene();
 		static void Flush();
 
-		static void DrawVideoSprite(const glm::mat4& transform, VideoRendererComponent& src, int entityID = -1);
+		static void DrawVideoSprite(TransformComponent& transform, VideoRendererComponent& src, VideoData& data, int entityID = -1);
 
 		static void ResetPacketDuration(VideoRendererComponent& src);
 
@@ -24,18 +24,9 @@ namespace Nutcrackz {
 		static void StartBatch();
 		static void NextBatch();
 
-		static void RenderVideo(const glm::mat4& transform, VideoRendererComponent& src, int entityID);
-		static void RenderFrame(const glm::mat4& transform, VideoRendererComponent& src, int entityID);
-		static void RenderCertainFrame(const glm::mat4& transform, VideoRendererComponent& src, int entityID);
-
-	private:
-		static bool m_HasInitializedTimer;
-		static double m_RestartPointFromPause;
-		static double m_PresentationTimeInSeconds;
-		static double m_VideoDuration;
-		static bool m_IsRenderingVideo;
-		static int64_t m_FramePosition;
-		static bool m_SeekAudio;
+		static void RenderVideo(TransformComponent& transform, const Ref<VideoTexture>& texture, VideoRendererComponent& src, VideoData& data, int entityID);
+		static void RenderFrame(TransformComponent& transform, const Ref<VideoTexture>& texture, VideoRendererComponent& src, VideoData& data, int entityID);
+		static void RenderCertainFrame(TransformComponent& transform, const Ref<VideoTexture>& texture, VideoRendererComponent& src, VideoData& data, int entityID);
 	};
 
 };
