@@ -1,12 +1,4 @@
 # FFMPEG_To_Texture_Renderer
-My Video Renderer used in my Hazel2D Clone...
-
-It is recommended to use this with the code from Hazel2D for easy operation,
-which can be obtained by going to https://github.com/TheCherno/Hazel/
-Though, you can use this code however you see fit.
-
-You will also need FFMpeg's .dll files, you can find them inside
-
-Nutcrackz/vendor
+The video renderer i created for my Hazel2D Clone...
 
 Enjoy :)
