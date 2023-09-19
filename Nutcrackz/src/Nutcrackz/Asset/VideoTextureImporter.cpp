@@ -11,21 +11,21 @@ namespace Nutcrackz {
 	{
 		NZ_PROFILE_FUNCTION();
 
-		std::filesystem::path fullPath = Project::GetAssetDirectory() / metadata.FilePath;
+		std::filesystem::path filepath = Project::GetAssetDirectory() / metadata.FilePath;
 		Buffer data;
 		VideoReaderState videoState;
 
 		{
 			NZ_PROFILE_SCOPE("stbi_load - TextureImporter::ImportVideoTexture");
 
-			if (!VideoTexture::VideoReaderOpen(&videoState, fullPath))
+			if (!VideoTexture::VideoReaderOpen(&videoState, filepath))
 			{
-				NZ_CORE_ERROR("TextureImporter::ImportVideoTexture - Could not video from filepath: {}", fullPath.string());
+				NZ_CORE_ERROR("TextureImporter::ImportVideoTexture - Could not video from filepath: {}", filepath.string());
 				return nullptr;
 			}
 
-			if (!VideoTexture::AudioReaderOpen(&videoState, fullPath))
-				NZ_CORE_ERROR("TextureImporter::ImportVideoTexture - Could not audio in video from filepath: {}", fullPath.string());
+			if (!VideoTexture::AudioReaderOpen(&videoState, filepath))
+				NZ_CORE_ERROR("TextureImporter::ImportVideoTexture - Could not audio in video from filepath: {}", filepath.string());
 		}
 
 		TextureSpecification spec;
@@ -38,11 +38,9 @@ namespace Nutcrackz {
 
 		if (data.Data == nullptr)
 		{
-			NZ_CORE_ERROR("TextureImporter::ImportVideoTexture - Could not load video from filepath: {}", fullPath.string());
+			NZ_CORE_ERROR("TextureImporter::ImportVideoTexture - Could not load video from filepath: {}", filepath.string());
 			return nullptr;
 		}
-
-		videoState.FilePath = fullPath;
 
 		Ref<VideoTexture> texture = VideoTexture::Create(spec, data, videoState);
 		data.Release();

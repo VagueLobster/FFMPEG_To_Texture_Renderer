@@ -24,9 +24,9 @@ namespace Nutcrackz {
 		static void StartBatch();
 		static void NextBatch();
 
-		static void RenderVideo(TransformComponent& transform, const Ref<VideoTexture>& texture, VideoRendererComponent& src, VideoData& data, int entityID);
-		static void RenderFrame(TransformComponent& transform, const Ref<VideoTexture>& texture, VideoRendererComponent& src, VideoData& data, int entityID);
-		static void RenderCertainFrame(TransformComponent& transform, const Ref<VideoTexture>& texture, VideoRendererComponent& src, VideoData& data, int entityID);
+		static void RenderVideo(TransformComponent& transform, VideoRendererComponent& src, VideoData& data, int entityID);
+		static void RenderStartFrame(TransformComponent& transform, VideoRendererComponent& src, VideoData& data, int entityID);
+		static void SeekToFrame(TransformComponent& transform, VideoRendererComponent& src, VideoData& data, int entityID);
 	};
 
 };

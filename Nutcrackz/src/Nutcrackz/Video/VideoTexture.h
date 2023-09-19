@@ -22,7 +22,7 @@ namespace Nutcrackz {
 
 	struct VideoReaderState
 	{
-		std::filesystem::path FilePath = "";
+		//std::filesystem::path FilePath = "";
 		int Width, Height;
 		double Duration;
 		int64_t VideoPacketDuration = 0;
@@ -58,7 +58,7 @@ namespace Nutcrackz {
 		static AssetType GetStaticType() { return AssetType::Video; }
 		virtual AssetType GetType() const { return GetStaticType(); }
 
-		uint32_t GetIDFromTexture(uint8_t* frameData, int64_t* pts, bool isPaused);
+		uint32_t GetIDFromTexture(uint8_t* frameData, int64_t* pts, bool isPaused, const std::filesystem::path& filepath);
 		void DeleteRendererID(const uint32_t& rendererID);
 
 		static bool VideoReaderOpen(VideoReaderState* state, const std::filesystem::path& filepath);
@@ -72,7 +72,7 @@ namespace Nutcrackz {
 		void CloseVideo(VideoReaderState* state);
 		void CloseAudio(VideoReaderState* state);
 
-		void ReadAndPlayAudio(VideoReaderState* state, int64_t ts, bool seek, bool isPaused);
+		void ReadAndPlayAudio(VideoReaderState* state, int64_t ts, bool seek, bool isPaused, const std::filesystem::path& filepath);
 		void ResetAudioPacketDuration(VideoReaderState* state);
 
 		float GetVolumeFactor() { return m_Volume; }
@@ -91,7 +91,7 @@ namespace Nutcrackz {
 		void SetRendererID(uint32_t id);
 		void SetData(Buffer data);
 
-		void Bind(uint32_t slot = 0) const;
+		void Bind(uint32_t slot = 0, bool isPlayingVideo = true);// const;
 
 		bool operator==(const VideoTexture& other) const
 		{

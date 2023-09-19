@@ -3,10 +3,14 @@
 
 #include "Nutcrackz/Video/VideoTexture.h"
 
+#include "Nutcrackz/Project/Project.h"
+
 #include "VertexArray.h"
 #include "Shader.h"
 #include "RenderCommand.h"
 #include "UniformBuffer.h"
+
+#include <timeapi.h>
 
 namespace Nutcrackz {
 
@@ -16,7 +20,7 @@ namespace Nutcrackz {
 		glm::vec4 Color;
 		glm::vec2 TexCoord;
 		glm::vec2 TilingFactor;
-		float TexIndex;
+		int TexIndex;
 		float Saturation;
 
 		// Editor-only
@@ -55,6 +59,7 @@ namespace Nutcrackz {
 		Ref<UniformBuffer> CameraUniformBuffer;
 
 		bool UseBillboard = false;
+		bool IsPlayingVideo = false;
 	};
 
 	static VideoRendererData s_VideoData;
@@ -69,7 +74,7 @@ namespace Nutcrackz {
 			{ ShaderDataType::Float4, "a_Color"        },
 			{ ShaderDataType::Float2, "a_TexCoord"     },
 			{ ShaderDataType::Float2, "a_TilingFactor" },
-			{ ShaderDataType::Float,  "a_TexIndex"     },
+			{ ShaderDataType::Int,    "a_TexIndex"     },
 			{ ShaderDataType::Float,  "a_Saturation"   },
 			{ ShaderDataType::Int,    "a_EntityID"     }
 		});
@@ -162,7 +167,7 @@ namespace Nutcrackz {
 			for (uint32_t i = 0; i < s_VideoData.VideoTextureSlotIndex; i++)
 			{
 				if (s_VideoData.VideoTextureSlots[i])
-					s_VideoData.VideoTextureSlots[i]->Bind(i);
+					s_VideoData.VideoTextureSlots[i]->Bind(i, s_VideoData.IsPlayingVideo);
 			}
 
 			s_VideoData.VideoShader->Bind();
@@ -253,9 +258,14 @@ namespace Nutcrackz {
 
 #pragma endregion
 
-	void VideoRenderer::RenderVideo(TransformComponent& transform, const Ref<VideoTexture>& texture, VideoRendererComponent& src, VideoData& data, int entityID)
+	void VideoRenderer::RenderVideo(TransformComponent& transform, VideoRendererComponent& src, VideoData& data, int entityID)
 	{
-		NZ_CORE_VERIFY(texture);
+		Ref<VideoTexture> texture = AssetManager::GetAsset<VideoTexture>(src.Video);
+
+		if (src.Video)
+		{
+			NZ_CORE_VERIFY(texture);
+		}
 
 		if (!data.HasInitializedTimer)
 		{
@@ -266,19 +276,20 @@ namespace Nutcrackz {
 		constexpr size_t videoVertexCount = 4;
 		constexpr glm::vec2 textureCoords[] = { { 0.0f, 1.0f }, { 1.0f, 1.0f }, { 1.0f, 0.0f }, { 0.0f, 0.0f }, };
 
-		float textureIndex = 0.0f;
+		int textureIndex = 0;
 		const glm::vec2 tilingFactor(1.0f);
 
 		// This if statement is very much required!
 		// Without it, this function creates a big memory leak!
 		if (data.VideoRendererID)
 			texture->DeleteRendererID(data.VideoRendererID);
-
+		
 		if (texture)
 		{
 			if (!data.UseExternalAudio)
 			{
-				texture->ReadAndPlayAudio(&texture->GetVideoState(), data.FramePosition, data.SeekAudio, data.PauseVideo);
+				texture->SetVolumeFactor(data.Volume);
+				texture->ReadAndPlayAudio(&texture->GetVideoState(), data.FramePosition, data.SeekAudio, data.PauseVideo, Project::GetAssetDirectory() / Project::GetActive()->GetEditorAssetManager()->GetFilePath(src.Video));
 			}
 
 			if (!data.IsRenderingVideo)
@@ -301,9 +312,9 @@ namespace Nutcrackz {
 				data.FramePosition = 0;
 			}
 
-			data.VideoRendererID = texture->GetIDFromTexture(data.VideoFrameData, &data.PresentationTimeStamp, data.PauseVideo);
+			data.VideoRendererID = texture->GetIDFromTexture(data.VideoFrameData, &data.PresentationTimeStamp, data.PauseVideo, Project::GetAssetDirectory() / Project::GetActive()->GetEditorAssetManager()->GetFilePath(src.Video));
 			texture->SetRendererID(data.VideoRendererID);
-
+			
 			if (data.PauseVideo)
 			{
 				if (!data.UseExternalAudio)
@@ -382,8 +393,12 @@ namespace Nutcrackz {
 					data.SeekAudio = true;
 					texture->DeleteRendererID(data.VideoRendererID);
 					texture->CloseVideo(&texture->GetVideoState());
-					data.VideoRendererID = texture->GetIDFromTexture(data.VideoFrameData, &data.PresentationTimeStamp, data.PauseVideo);
+
+					std::filesystem::path filepath = Project::GetAssetDirectory() / Project::GetActive()->GetEditorAssetManager()->GetFilePath(src.Video);
+					data.VideoRendererID = texture->GetIDFromTexture(data.VideoFrameData, &data.PresentationTimeStamp, data.PauseVideo, filepath);
+
 					texture->SetRendererID(data.VideoRendererID);
+					
 					data.PresentationTimeStamp = 0;
 					SetTime(0.0);
 					data.RestartPointFromPause = 0.0;
@@ -397,22 +412,23 @@ namespace Nutcrackz {
 			{
 				if (*s_VideoData.VideoTextureSlots[i] == *texture)
 				{
-					textureIndex = (float)i;
+					textureIndex = i;
 					break;
 				}
 			}
 
-			if (textureIndex == 0.0f)
+			if (textureIndex == 0)
 			{
 				if (s_VideoData.VideoTextureSlotIndex >= VideoRendererData::MaxTextureSlots)
 					NextBatch();
 
-				textureIndex = (float)s_VideoData.VideoTextureSlotIndex;
+				textureIndex = s_VideoData.VideoTextureSlotIndex;
+				s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = texture;
 
-				if (texture)
-					s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = texture;
-				else
-					s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = s_VideoData.WhiteVideoTexture;
+				//if (texture)
+				//	s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = texture;
+				//else
+				//	s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = s_VideoData.WhiteVideoTexture;
 
 				s_VideoData.VideoTextureSlotIndex++;
 			}
@@ -452,12 +468,17 @@ namespace Nutcrackz {
 		}
 
 		s_VideoData.VideoIndexCount += 6;
+		//s_Data.Stats.QuadCount++;
 	}
 
-	void VideoRenderer::RenderFrame(TransformComponent& transform, const Ref<VideoTexture>& texture, VideoRendererComponent& src, VideoData& data, int entityID)
+	void VideoRenderer::RenderStartFrame(TransformComponent& transform, VideoRendererComponent& src, VideoData& data, int entityID)
 	{
+		Ref<VideoTexture> texture = AssetManager::GetAsset<VideoTexture>(src.Video);
+
+		//NZ_CORE_VERIFY(texture);
+
 		constexpr size_t videoVertexCount = 4;
-		float textureIndex = 0.0f;
+		int textureIndex = 0;
 
 		const glm::vec2 tilingFactor(1.0f);
 
@@ -490,10 +511,15 @@ namespace Nutcrackz {
 				}
 
 				data.SeekAudio = true;
+
 				texture->DeleteRendererID(data.VideoRendererID);
 				texture->CloseVideo(&texture->GetVideoState());
-				data.VideoRendererID = texture->GetIDFromTexture(data.VideoFrameData, &data.PresentationTimeStamp, data.PauseVideo);
+
+				std::filesystem::path filepath = Project::GetAssetDirectory() / Project::GetActive()->GetEditorAssetManager()->GetFilePath(src.Video);
+				data.VideoRendererID = texture->GetIDFromTexture(data.VideoFrameData, &data.PresentationTimeStamp, data.PauseVideo, filepath);
+
 				texture->SetRendererID(data.VideoRendererID);
+				
 				data.PresentationTimeStamp = 0;
 				SetTime(0.0);
 				data.RestartPointFromPause = 0.0;
@@ -503,8 +529,12 @@ namespace Nutcrackz {
 			{
 				texture->DeleteRendererID(data.VideoRendererID);
 				texture->CloseVideo(&texture->GetVideoState());
-				data.VideoRendererID = texture->GetIDFromTexture(data.VideoFrameData, &data.PresentationTimeStamp, data.PauseVideo);
+
+				std::filesystem::path filepath = Project::GetAssetDirectory() / Project::GetActive()->GetEditorAssetManager()->GetFilePath(src.Video);
+				data.VideoRendererID = texture->GetIDFromTexture(data.VideoFrameData, &data.PresentationTimeStamp, data.PauseVideo, filepath);
+
 				texture->SetRendererID(data.VideoRendererID);
+				
 				data.PresentationTimeStamp = 0;
 				SetTime(0.0);
 				data.RestartPointFromPause = 0.0;
@@ -533,22 +563,23 @@ namespace Nutcrackz {
 			{
 				if (*s_VideoData.VideoTextureSlots[i] == *texture)
 				{
-					textureIndex = (float)i;
+					textureIndex = i;
 					break;
 				}
 			}
 
-			if (textureIndex == 0.0f)
+			if (textureIndex == 0)
 			{
 				if (s_VideoData.VideoTextureSlotIndex >= VideoRendererData::MaxTextureSlots)
 					NextBatch();
 
-				textureIndex = (float)s_VideoData.VideoTextureSlotIndex;
+				textureIndex = s_VideoData.VideoTextureSlotIndex;
+				s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = texture;
 
-				if (texture)
-					s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = texture;
-				else
-					s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = s_VideoData.WhiteVideoTexture;
+				//if (texture)
+				//	s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = texture;
+				//else
+				//	s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = s_VideoData.WhiteVideoTexture;
 
 				s_VideoData.VideoTextureSlotIndex++;
 			}
@@ -590,12 +621,14 @@ namespace Nutcrackz {
 		s_VideoData.VideoIndexCount += 6;
 	}
 
-	void VideoRenderer::RenderCertainFrame(TransformComponent& transform, const Ref<VideoTexture>& texture, VideoRendererComponent& src, VideoData& data, int entityID)
+	void VideoRenderer::SeekToFrame(TransformComponent& transform, VideoRendererComponent& src, VideoData& data, int entityID)
 	{
+		Ref<VideoTexture> texture = AssetManager::GetAsset<VideoTexture>(src.Video);
+
 		NZ_CORE_VERIFY(texture);
 
 		constexpr size_t videoVertexCount = 4;
-		float textureIndex = 0.0f;
+		int textureIndex = 0;
 
 		const glm::vec2 tilingFactor(1.0f);
 
@@ -655,7 +688,10 @@ namespace Nutcrackz {
 
 				data.PresentationTimeStamp = data.FramePosition;
 				texture->DeleteRendererID(data.VideoRendererID);
-				data.VideoRendererID = texture->GetIDFromTexture(data.VideoFrameData, &data.PresentationTimeStamp, data.PauseVideo);
+
+				std::filesystem::path filepath = Project::GetAssetDirectory() / Project::GetActive()->GetEditorAssetManager()->GetFilePath(src.Video);
+				data.VideoRendererID = texture->GetIDFromTexture(data.VideoFrameData, &data.PresentationTimeStamp, data.PauseVideo, filepath);
+
 				texture->SetRendererID(data.VideoRendererID);
 			}
 
@@ -666,22 +702,23 @@ namespace Nutcrackz {
 			{
 				if (*s_VideoData.VideoTextureSlots[i] == *texture)
 				{
-					textureIndex = (float)i;
+					textureIndex = i;
 					break;
 				}
 			}
 
-			if (textureIndex == 0.0f)
+			if (textureIndex == 0)
 			{
 				if (s_VideoData.VideoTextureSlotIndex >= VideoRendererData::MaxTextureSlots)
 					NextBatch();
 
-				textureIndex = (float)s_VideoData.VideoTextureSlotIndex;
+				textureIndex = s_VideoData.VideoTextureSlotIndex;
+				s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = texture;
 
-				if (texture)
-					s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = texture;
-				else
-					s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = s_VideoData.WhiteVideoTexture;
+				//if (texture)
+				//	s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = texture;
+				//else
+				//	s_VideoData.VideoTextureSlots[s_VideoData.VideoTextureSlotIndex] = s_VideoData.WhiteVideoTexture;
 
 				s_VideoData.VideoTextureSlotIndex++;
 			}
@@ -725,13 +762,19 @@ namespace Nutcrackz {
 
 	void VideoRenderer::DrawVideoSprite(TransformComponent& transform, VideoRendererComponent& src, VideoData& data, int entityID)
 	{
-		Ref<VideoTexture> texture = AssetManager::GetAsset<VideoTexture>(src.Video);
+		s_VideoData.IsPlayingVideo = data.PlayVideo;
 		if (data.PlayVideo)
-			RenderVideo(transform, texture, src, data, entityID);
+		{
+			RenderVideo(transform, src, data, entityID);
+		}
 		else if (!data.PlayVideo && data.FramePosition == 0)
-			RenderFrame(transform, texture, src, data, entityID);
+		{
+			RenderStartFrame(transform, src, data, entityID);
+		}
 		else if (!data.PlayVideo && data.FramePosition != 0)
-			RenderCertainFrame(transform, texture, src, data, entityID);
+		{
+			SeekToFrame(transform, src, data, entityID);
+		}
 	}
 
 	void VideoRenderer::ResetPacketDuration(VideoRendererComponent& src)

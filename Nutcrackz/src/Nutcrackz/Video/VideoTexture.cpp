@@ -99,8 +99,7 @@ namespace Nutcrackz {
 
 		if (data)
 		{
-			if (!m_IsVideoLoaded)
-				m_IsVideoLoaded = true;
+			m_IsVideoLoaded = true;
 
 			int64_t pts;
 			if (!VideoReaderReadFrame(&m_VideoState, data.Data, &pts, false))
@@ -128,13 +127,13 @@ namespace Nutcrackz {
 		}
 	}
 
-	uint32_t VideoTexture::GetIDFromTexture(uint8_t* frameData, int64_t* pts, bool isPaused)
+	uint32_t VideoTexture::GetIDFromTexture(uint8_t* frameData, int64_t* pts, bool isPaused, const std::filesystem::path& filepath)
 	{
 		uint32_t rendererID = 0;
 
 		if (!m_IsVideoLoaded)
 		{
-			if (!VideoReaderOpen(&m_VideoState, m_VideoState.FilePath))
+			if (!VideoReaderOpen(&m_VideoState, filepath))
 			{
 				NZ_CORE_WARN("Couldn't load video file!");
 				return 0;
@@ -945,11 +944,11 @@ namespace Nutcrackz {
 		}
 	}
 
-	void VideoTexture::ReadAndPlayAudio(VideoReaderState* state, int64_t ts, bool seek, bool isPaused)
+	void VideoTexture::ReadAndPlayAudio(VideoReaderState* state, int64_t ts, bool seek, bool isPaused, const std::filesystem::path& filepath)
 	{
 		if (!m_HasLoadedAudio)
 		{
-			if (!AudioReaderOpen(&m_VideoState, m_VideoState.FilePath))
+			if (!AudioReaderOpen(&m_VideoState, filepath))
 			{
 				NZ_CORE_WARN("Couldn't load video file!");
 				return;
@@ -1015,7 +1014,7 @@ namespace Nutcrackz {
 		glTextureSubImage2D(m_RendererID, 0, 0, 0, m_Width, m_Height, GL_RGBA, GL_UNSIGNED_BYTE, data.Data);
 	}
 
-	void VideoTexture::Bind(uint32_t slot) const
+	void VideoTexture::Bind(uint32_t slot, bool isPlayingVideo)// const
 	{
 		//NZ_PROFILE_FUNCTION();
 
